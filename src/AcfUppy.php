@@ -11,25 +11,34 @@
 
 namespace AcfUppy;
 
+use AcfUppy\Exception\ReadErrorException;
 use Apfelbox\FileDownload\FileDownload;
+use TusPhp\Cache\AbstractCache;
+use TusPhp\Tus\Server;
 
 class AcfUppy
 {
+    /**
+     * @var array{version:string,fieldType:string,url:string,path:string,destPath:mixed,tmpPath:mixed,symlinkUrl:mixed,symlinkPath:mixed,cacheTtl:mixed}
+     */
     public $settings;
+
+    /**
+     * @var Server
+     */
     public $server;
 
-    /*
-    *  __construct
-    *
-    *  This function will setup the class functionality
-    *
-    *  @type	function
-    *  @date	17/02/2016
-    *  @since	1.0.0
-    *
-    *  @param	void
-    *  @return	void
-    */
+    /**
+     *  __construct
+     *
+     *  This function will setup the class functionality
+     *
+     * @type    function
+     * @date    17/02/2016
+     * @throws ReadErrorException
+     * @throws \ReflectionException
+     * @since    1.0.0
+     */
     public function __construct()
     {
         add_action('plugins_loaded', function (): void {
@@ -62,7 +71,10 @@ class AcfUppy
             );
 
             //https://github.com/ankitpokhrel/tus-php/issues/102
-            $this->server->getCache()->setTtl($this->settings['cacheTtl']);
+            $cache = $this->server->getCache();
+            if ($cache instanceof AbstractCache) {
+                $cache->setTtl($this->settings['cacheTtl']);
+            }
 
             $this->server->middleware()->add(
                 \AcfUppy\Middleware\Auth::class,
@@ -74,7 +86,12 @@ class AcfUppy
                 $fileMeta = $event->getFile()->details();
                 $fieldName = basename(dirname($fileMeta['file_path']));
 
-                foreach (glob(trailingslashit($this->server->getUploadDir()) . '*') as $path) {
+                $dirs = glob(trailingslashit($this->server->getUploadDir()) . '*');
+                if (false === $dirs) {
+                    throw new ReadErrorException('error reading ' . trailingslashit($this->server->getUploadDir()) . '*');
+                }
+
+                foreach ($dirs as $path) {
                     if ($fileMeta['file_path'] === $path) {
                         continue;
                     }
@@ -86,18 +103,20 @@ class AcfUppy
 
                 $requestKey = $event->getRequest()->key();
 
-                //https://github.com/ankitpokhrel/tus-php/issues/102
-                $cacheKeys = $this->server->getCache()->keys();
-                //$this->server->getCache()->deleteAll( $cacheKeys );
+                $cache = $this->server->getCache();
+                if (!method_exists($cache, 'getActualCacheKey')) {
+                    return;
+                }
 
-                foreach ($cacheKeys as $cacheKey) {
-                    if ($this->server->getCache()->getActualCacheKey($requestKey) === $cacheKey) {
+                //https://github.com/ankitpokhrel/tus-php/issues/102
+                foreach ($cache->keys() as $cacheKey) {
+                    if ($cache->getActualCacheKey($requestKey) === $cacheKey) {
                         continue;
                     }
 
-                    if ($oldFileMeta = $this->server->getCache()->get($cacheKey)) {
+                    if ($oldFileMeta = $cache->get($cacheKey)) {
                         if (preg_match('~'.preg_quote('/'.get_current_user_id().'/'.$fieldName.'/').'~', $oldFileMeta['file_path'])) {
-                            $this->server->getCache()->delete($cacheKey);
+                            $cache->delete($cacheKey);
                         }
                     }
                 }
@@ -182,7 +201,11 @@ class AcfUppy
                                     global $wp_filesystem;
 
                                     $i=0;
-                                    foreach (glob(trailingslashit($this->settings['symlinkPath']).'*') as $path) {
+                                    $paths = glob(trailingslashit($this->settings['symlinkPath']).'*');
+                                    if (false === $paths) {
+                                        throw new ReadErrorException('error reading ' . trailingslashit($this->settings['symlinkPath']).'*');
+                                    }
+                                    foreach ($paths as $path) {
                                         if (is_dir($path)) {
                                             if (basename($path) === $wp->query_vars[ACF_UPPY_NAME_UNDERSCORE . '_pubkey']) {
                                                 continue;
@@ -191,7 +214,7 @@ class AcfUppy
                                             //https://stackoverflow.com/a/34512584
                                             $stat = stat($path);
 
-                                            if (isset($stat['mtime'])) {
+                                            if (false !== $stat && isset($stat['mtime'])) {
                                                 $diff = ((time() - $stat['mtime']) / (60 * 60 * 24));
 
                                                 if ($diff >= apply_filters(ACF_UPPY_NAME_UNDERSCORE.'/'.$wp->query_vars[ACF_UPPY_NAME_UNDERSCORE . '_action'].'_symlink_delete_days', 1)) {
@@ -250,31 +273,37 @@ class AcfUppy
         }, 0);
 
         add_action('wp', function ($wp): void {
-            if (is_user_logged_in()) {
-                if (!defined('DOING_AJAX') || !DOING_AJAX) {
-                    if (is_dir($this->settings['tmpPath'])) {
-                        require_once(ABSPATH . '/wp-admin/includes/file.php');
-                        WP_Filesystem();
+            if (!is_user_logged_in()) {
+                return;
+            }
+            if (defined('DOING_AJAX') && DOING_AJAX) {
+                return;
+            }
+            if (is_dir($this->settings['tmpPath'])) {
+                require_once(ABSPATH . '/wp-admin/includes/file.php');
+                WP_Filesystem();
 
-                        global $wp_filesystem;
+                global $wp_filesystem;
 
-                        foreach (glob(trailingslashit($this->settings['tmpPath']) . '*') as $path) {
-                            if (is_dir($path)) {
-                                @$wp_filesystem->rmdir($path, true);
-                            }
-                        }
+                $paths = glob(trailingslashit($this->settings['tmpPath']) . '*');
+                if (false === $paths) {
+                    throw new ReadErrorException('error reading ' . trailingslashit($this->settings['tmpPath']) . '*');
+                }
+                foreach ($paths as $path) {
+                    if (is_dir($path)) {
+                        @$wp_filesystem->rmdir($path, true);
                     }
+                }
+            }
 
-                    //https://github.com/ankitpokhrel/tus-php/issues/102
-                    $cacheKeys = $this->server->getCache()->keys();
-                    //$this->server->getCache()->deleteAll( $cacheKeys );
+            //https://github.com/ankitpokhrel/tus-php/issues/102
+            $cacheKeys = $this->server->getCache()->keys();
+            //$this->server->getCache()->deleteAll( $cacheKeys );
 
-                    foreach ($cacheKeys as $cacheKey) {
-                        if ($oldFileMeta = $this->server->getCache()->get($cacheKey)) {
-                            if (preg_match('~^'.preg_quote(trailingslashit($this->settings['tmpPath'])).'~', $oldFileMeta['file_path'])) {
-                                $this->server->getCache()->delete($cacheKey);
-                            }
-                        }
+            foreach ($cacheKeys as $cacheKey) {
+                if ($oldFileMeta = $this->server->getCache()->get($cacheKey)) {
+                    if (preg_match('~^'.preg_quote(trailingslashit($this->settings['tmpPath'])).'~', $oldFileMeta['file_path'])) {
+                        $this->server->getCache()->delete($cacheKey);
                     }
                 }
             }
@@ -291,7 +320,11 @@ class AcfUppy
 
                     foreach ($destPaths as $destPath) {
                         if (is_dir($destPath)) {
-                            foreach (glob(trailingslashit($destPath) . '*') as $path) {
+                            $paths = glob(trailingslashit($destPath) . '*');
+                            if (false === $paths) {
+                                throw new ReadErrorException('error reading ' . trailingslashit($destPath) . '*');
+                            }
+                            foreach ($paths as $path) {
                                 if (is_file($path)) {
                                     if (in_array($path, $destFiles, true)) {
                                         continue;
@@ -333,7 +366,7 @@ class AcfUppy
                             $query->the_post();
 
                             $destPath = !empty($field['destPath']) ? trailingslashit($field['destPath']) : apply_filters(ACF_UPPY_NAME_UNDERSCORE . '/dest_path/type=' . get_post_type(), trailingslashit($this->settings['destPath']), get_the_ID(), $field);
-                            $destPath .= trailingslashit(get_the_ID()) . trailingslashit(sanitize_file_name($field['key']));
+                            $destPath .= trailingslashit((string)get_the_ID()) . trailingslashit(sanitize_file_name($field['key']));
 
                             if (is_dir($destPath)) {
                                 @$wp_filesystem->rmdir($destPath, true);
@@ -370,7 +403,7 @@ class AcfUppy
         add_action('acf/register_fields', array($this, 'include_field')); // v4
     }
 
-    /*
+    /**
     *  include_field
     *
     *  This function will include the field type class
@@ -379,8 +412,7 @@ class AcfUppy
     *  @date	17/02/2016
     *  @since	1.0.0
     *
-    *  @param	$version (int) major ACF version. Defaults to false
-    *  @return	void
+    *  @param	int|false $version major ACF version. Defaults to false
     */
     public function include_field($version = false): void
     {
@@ -407,7 +439,7 @@ class AcfUppy
         }
     }
 
-    public function getSubValues(array $values, string $fieldName, array $returns = array())
+    public function getSubValues(array $values, string $fieldName, array $returns = array()): array
     {
         if (!empty($values) && !empty($fieldName)) {
             foreach ($values as $id => $subValues) {
@@ -424,7 +456,7 @@ class AcfUppy
         return $returns;
     }
 
-    public function getDestFiles(array $fieldsObj, int $postId, array $values = array(), array $returns = array())
+    public function getDestFiles(array $fieldsObj, int $postId, array $values = array(), array $returns = array()): array
     {
         if (!empty($fieldsObj)) {
             $postType = get_post_type($postId);
@@ -432,7 +464,7 @@ class AcfUppy
             foreach ($fieldsObj as $field) {
                 if ($field['type'] === $this->settings['fieldType']) {
                     $destPath = !empty($field['destPath']) ? trailingslashit($field['destPath']) : apply_filters(ACF_UPPY_NAME_UNDERSCORE.'/dest_path/type='.$postType, trailingslashit($this->settings['destPath']), $postId, $field);
-                    $destPath .= trailingslashit($postId);
+                    $destPath .= trailingslashit((string)$postId);
                     $destPath .= trailingslashit(sanitize_file_name($field['key']));
 
                     if (!empty($field['value'])) {
@@ -455,7 +487,7 @@ class AcfUppy
         return $returns;
     }
 
-    public function getDestPaths(array $fieldsObj, int $postId, $fullPath = true, array $returns = array())
+    public function getDestPaths(array $fieldsObj, int $postId, bool $fullPath = true, array $returns = array()): array
     {
         if (!empty($fieldsObj)) {
             $postType = get_post_type($postId);
@@ -463,7 +495,7 @@ class AcfUppy
             foreach ($fieldsObj as $field) {
                 if ($field['type'] === $this->settings['fieldType']) {
                     $destPath = !empty($field['destPath']) ? trailingslashit($field['destPath']) : apply_filters(ACF_UPPY_NAME_UNDERSCORE.'/dest_path/type='.$postType, trailingslashit($this->settings['destPath']), $postId, $field);
-                    $destPath .= trailingslashit($postId);
+                    $destPath .= trailingslashit((string)$postId);
 
                     if ($fullPath) {
                         $destPath .= trailingslashit(sanitize_file_name($field['key']));

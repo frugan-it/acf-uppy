@@ -2,10 +2,17 @@ includes:
     - vendor/szepeviktor/phpstan-wordpress/extension.neon
 parameters:
     level: max
-    excludes_analyse:
-        - build/*
-        - symlink/*
-        - vendor/*
+    checkMissingIterableValueType: false
+    scanFiles:
+        - acf-uppy.php
+    bootstrapFiles:
+        - stubs/constants.stub
+    scanDirectories:
+        - vendor/wpackagist-plugin/advanced-custom-fields/includes
     paths:
-        - %currentWorkingDirectory%/src/
+        - src/
+    ignoreErrors:
+        - '#^Function apply_filters(_ref_array)? invoked with [34567] parameters, 2 required\.$#'
+
+
 
